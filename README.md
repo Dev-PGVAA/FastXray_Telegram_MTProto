@@ -129,4 +129,4 @@ journalctl -u awg-quick@awg0 -n 50
 
 ## Лицензия
 
-MIT
+[MIT](./LICENSE)
