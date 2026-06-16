@@ -1,4 +1,4 @@
-# AutoXRay & AWG 2.0
+# VPN Setup Script
  
 Автоматическая установка и настройка VPN-сервера на Debian с использованием:
 - **Xray** (VLESS + REALITY, Shadowsocks)
@@ -17,12 +17,18 @@ sudo bash setup_vpn.sh
 ```
  
 Скрипт автоматически:
-1. Обновит систему и установит необходимые пакеты
-2. Установит и настроит Xray с VLESS+REALITY на портах 443/8443
-3. Установит Shadowsocks на порту 2040 (резервной протокол)
-4. Собери и настроит AmneziaWG 2.0 на порту 51820
-5. Настроит UFW firewall
-6. Выведет готовые конфиги для клиентов
+1. **Опционально создаст нового пользователя** (с правами sudo)
+2. Обновит систему и установит необходимые пакеты
+3. Установит и настроит Xray с VLESS+REALITY на портах 443/8443
+4. Установит Shadowsocks на порту 2040 (резервной протокол)
+5. Собери и настроит AmneziaWG 2.0 на порту 51820
+6. Настроит UFW firewall
+7. Выведет готовые конфиги для клиентов
+**Логирование**: весь процесс пишется в `/var/log/vpn-setup.log`
+```bash
+tail -f /var/log/vpn-setup.log
+```
+ 
 ## Конфиги клиентов
  
 После установки скрипт выведет:
@@ -67,13 +73,46 @@ systemctl restart awg-quick@awg0
 ufw status
 ```
  
+## Проверка статуса после установки
+ 
+```bash
+# Смотри последние строки логов
+tail /var/log/vpn-setup.log
+ 
+# Проверь что Xray работает
+systemctl is-active xray
+ 
+# Проверь что AmneziaWG работает
+ip link show awg0
+ 
+# Проверь firewall
+ufw status numbered
+```
+ 
 ## Примечания
  
 - Каждый запуск скрипта генерирует новые ключи и параметры обфускации
 - AmneziaWG требует клиент версии ≥ 4.8.12.7 (поддержка AWG 2.0)
 - Для добавления новых клиентов в AmneziaWG отредактируй `/etc/amnezia/amneziawg/awg0.conf` и добавь новые `[Peer]` секции
 - SSH открыт на порту 22 (не закрывается firewall'ом)
+## Troubleshooting
+ 
+**Ошибка при установке?**
+- Смотри полный лог: `cat /var/log/vpn-setup.log`
+- Скрипт остановится с номером строки где произошла ошибка
+- Убедись что запустил от root: `sudo bash setup_vpn.sh`
+**Xray не запускается**
+```bash
+systemctl restart xray
+journalctl -u xray -n 50  # последние 50 строк логов
+```
+ 
+**AmneziaWG не поднялся**
+```bash
+WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go awg-quick up awg0
+journalctl -u awg-quick@awg0 -n 50
+```
+ 
 ## Лицензия
  
 MIT
- 
