@@ -1,77 +1,57 @@
 #!/bin/bash
-
 set -euo pipefail
 
 LOG_FILE="/var/log/vpn-setup.log"
+SCRIPT_DIR="/usr/local/etc/xray"
+CLIENT_DIR="$SCRIPT_DIR/client_configs"
+KEY_DIR="$SCRIPT_DIR/ssh_keys"
+SERVER_IP_DEFAULT="62.171.228.97"
 
-# Исправление 5: read работает с /dev/tty
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "===== Запуск установки: $(date) ====="
-
-# Исправление 10: лучшая обработка ошибок
 trap 'echo "❌ Ошибка на строке $LINENO. Смотри лог: $LOG_FILE"; exit 1' ERR
 
-if [[ $EUID -ne 0 ]]; then
-  echo "Запусти от root (sudo bash setup_vpn.sh)"
-  exit 1
-fi
-
-# Определяем цвета (только для терминала)
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    RESET='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' RESET=''
-fi
-
-# Вспомогательная функция для заголовков секций
 print_section() {
-    echo -e "\n${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "${BOLD}${YELLOW}  $1${RESET}"
-    echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  $1"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# ============================================================
-# 0. Создание нового пользователя (опционально)
-# ============================================================
-# Исправление 5: read с /dev/tty
-read -p "Создать нового пользователя? (y/n): " -n 1 -r < /dev/tty
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-  read -p "Имя пользователя: " username < /dev/tty
-  if id "$username" &>/dev/null 2>&1; then
-    echo "Пользователь $username уже существует"
-  else
-    useradd -m -s /bin/bash "$username"
-    usermod -aG sudo "$username"
-    echo "Пользователь $username создан с правами sudo"
-    echo "Установи пароль вручную: passwd $username"
+need_root() {
+  if [[ $EUID -ne 0 ]]; then
+    echo "Запусти от root: sudo bash setup_vpn.sh"
+    exit 1
   fi
-fi
+}
 
-echo "=== 1. Обновление и установка необходимых пакетов ==="
-# Исправление 1: добавлен gettext для envsubst
-apt update && apt install -y jq curl wget build-essential make git ufw gettext-base gettext
+get_server_ip() {
+  local ip
+  ip="$(hostname -I | awk '{print $1}' || true)"
+  if [[ -z "${ip:-}" ]]; then
+    ip="$SERVER_IP_DEFAULT"
+  fi
+  echo "$ip"
+}
 
-# ============================================================
-# 2. Установка Xray
-# ============================================================
-echo "=== 2. Установка Xray-core ==="
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+make_dirs() {
+  mkdir -p "$SCRIPT_DIR" "$CLIENT_DIR" "$KEY_DIR"
+  chmod 700 "$KEY_DIR"
+}
 
-SCRIPT_DIR=/usr/local/etc/xray
-mkdir -p "$SCRIPT_DIR"
+install_packages() {
+  apt update
+  apt install -y jq curl wget build-essential make git ufw gettext-base openssl
+}
 
-# --- генерация переменных ---
-xray_uuid_vrv=$(xray uuid)
+install_xray() {
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+}
 
-# Исправление 2: исправлен массив доменов (убрано Markdown-форматирование)
-domains=(
+generate_xray_data() {
+  xray_uuid_vrv="$(xray uuid)"
+
+  domains=(
     www.theregister.com
     www.20minutes.fr
     www.dealabs.com
@@ -85,28 +65,23 @@ domains=(
     www.bing.com
     github.com
     tradingview.com
-)
-xray_dest_vrv=${domains[$RANDOM % ${#domains[@]}]}
-xray_dest_vrv222=${domains[$RANDOM % ${#domains[@]}]}
+  )
 
-key_output=$(xray x25519)
-xray_privateKey_vrv=$(echo "$key_output" | awk -F': ' '/PrivateKey/ {print $2}')
-# Исправление 3: PublicKey вместо Password
-xray_publicKey_vrv=$(echo "$key_output" | awk -F': ' '/PublicKey/ {print $2}')
-xray_shortIds_vrv=$(openssl rand -hex 8)
-xray_sspasw_vrv=$(openssl rand -base64 15 | tr -dc 'A-Za-z0-9' | head -c 20)
+  xray_dest_vrv="${domains[$RANDOM % ${#domains[@]}]}"
+  xray_dest_vrv222="${domains[$RANDOM % ${#domains[@]}]}"
 
-# Исправление 9: надежное получение IP
-ipserv=$(ip -4 addr show | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+  key_output="$(xray x25519)"
+  xray_privateKey_vrv="$(awk -F': ' '/PrivateKey/ {print $2}' <<< "$key_output")"
+  xray_publicKey_vrv="$(awk -F': ' '/PublicKey/ {print $2}' <<< "$key_output")"
+  xray_shortIds_vrv="$(openssl rand -hex 8)"
+  xray_sspasw_vrv="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  ipserv="$(get_server_ip)"
 
-# Если IP не получен, используем hostname
-if [[ -z "$ipserv" ]]; then
-    ipserv=$(hostname -I | awk '{print $1}')
-fi
+  export xray_uuid_vrv xray_dest_vrv xray_dest_vrv222 xray_privateKey_vrv xray_publicKey_vrv xray_shortIds_vrv xray_sspasw_vrv ipserv
+}
 
-export xray_uuid_vrv xray_dest_vrv xray_dest_vrv222 xray_privateKey_vrv xray_publicKey_vrv xray_shortIds_vrv xray_sspasw_vrv ipserv
-
-cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
+write_xray_config() {
+  cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
 {
   "log": {
     "dnsLog": false,
@@ -123,7 +98,7 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
   },
   "inbounds": [
     {
-      "tag": "VLESStcpREALITY",
+      "tag": "VLESS443",
       "port": 443,
       "listen": "0.0.0.0",
       "protocol": "vless",
@@ -150,22 +125,12 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
           "spiderX": "/",
           "shortIds": ["${xray_shortIds_vrv}"],
           "privateKey": "${xray_privateKey_vrv}",
-          "serverNames": ["${xray_dest_vrv}"],
-          "limitFallbackUpload": {
-            "afterBytes": 0,
-            "bytesPerSec": 65536,
-            "burstBytesPerSec": 0
-          },
-          "limitFallbackDownload": {
-            "afterBytes": 5242880,
-            "bytesPerSec": 262144,
-            "burstBytesPerSec": 2097152
-          }
+          "serverNames": ["${xray_dest_vrv}"]
         }
       }
     },
     {
-      "tag": "Vless8443",
+      "tag": "VLESS8443",
       "port": 8443,
       "listen": "0.0.0.0",
       "protocol": "vless",
@@ -192,22 +157,12 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
           "spiderX": "/",
           "shortIds": ["${xray_shortIds_vrv}"],
           "privateKey": "${xray_privateKey_vrv}",
-          "serverNames": ["${xray_dest_vrv222}"],
-          "limitFallbackUpload": {
-            "afterBytes": 0,
-            "bytesPerSec": 65536,
-            "burstBytesPerSec": 0
-          },
-          "limitFallbackDownload": {
-            "afterBytes": 5242880,
-            "bytesPerSec": 262144,
-            "burstBytesPerSec": 2097152
-          }
+          "serverNames": ["${xray_dest_vrv222}"]
         }
       }
     },
     {
-      "tag": "ShadowsocksTCP",
+      "tag": "Shadowsocks2040",
       "port": 2040,
       "listen": "0.0.0.0",
       "protocol": "shadowsocks",
@@ -232,7 +187,9 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
     {
       "tag": "direct",
       "protocol": "freedom",
-      "settings": { "domainStrategy": "ForceIPv4" }
+      "settings": {
+        "domainStrategy": "ForceIPv4"
+      }
     },
     {
       "tag": "block",
@@ -253,138 +210,79 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
   }
 }
 EOF
-
-systemctl enable xray
-systemctl restart xray
-echo "Xray готов."
-
-# ============================================================
-# 3. Firewall (ufw)
-# ============================================================
-echo "=== 3. Настройка firewall ==="
-
-# Исправление 4: проверка порта 443
-if ss -tlnp | grep -q ':443'; then
-    echo "${YELLOW}⚠️ Порт 443 занят. Проверьте: ss -tlnp | grep 443${RESET}"
-    echo "${YELLOW}Если занят nginx/apache, остановите: systemctl stop nginx apache2${RESET}"
-fi
-
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow OpenSSH
-ufw allow 443/tcp    comment 'xray vless reality'
-ufw allow 8443/tcp   comment 'xray vless reality 2'
-ufw allow 2040/tcp   comment 'xray shadowsocks'
-ufw --force enable
-
-# ============================================================
-# 4. Настройка SSH
-# ============================================================
-echo "=== 4. Настройка SSH ==="
-
-# Исправление 4: замените на действительные публичные ключи
-SSH_PUBKEYS=(
-  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD действительный_ключ_1 сюда"
-  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD действительный_ключ_2 сюда"
-  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD действительный_ключ_3 сюда"
-)
-
-# Функция для настройки SSH для конкретного пользователя
-setup_ssh_for_user() {
-  local user_home=$1
-  local user_name=$2
-  
-  mkdir -p "$user_home/.ssh"
-  
-  # Очищаем файл authorized_keys и добавляем ключи
-  > "$user_home/.ssh/authorized_keys"
-  for key in "${SSH_PUBKEYS[@]}"; do
-    echo "$key" >> "$user_home/.ssh/authorized_keys"
-  done
-  
-  # Правильные права доступа
-  chmod 700 "$user_home/.ssh"
-  chmod 600 "$user_home/.ssh/authorized_keys"
-  chown -R "$user_name:$user_name" "$user_home/.ssh"
-  
-  echo "SSH ключи добавлены для пользователя $user_name"
 }
 
-# Настройка SSH для root и созданного пользователя
-setup_ssh_for_user "/root" "root"
-if [[ ! -z "$username" ]] && [[ "$username" != "root" ]]; then
-  setup_ssh_for_user "/home/$username" "$username"
-fi
+start_xray() {
+  systemctl enable xray
+  systemctl restart xray
+}
 
-# Настройка sshd_config
-SSHD_CONFIG="/etc/ssh/sshd_config"
-
-# Бэкап оригинального конфига
-if [ ! -f "${SSHD_CONFIG}.backup" ]; then
-  cp "$SSHD_CONFIG" "${SSHD_CONFIG}.backup"
-fi
-
-# Функция для безопасного изменения параметров SSH
-update_ssh_config() {
-  local key=$1
-  local value=$2
-  
-  # Если параметр существует (в том числе закомментированный), обновляем его
-  if grep -q "^#\?${key}\s" "$SSHD_CONFIG"; then
-    sed -i "s/^#\?${key}\s.*/${key} ${value}/" "$SSHD_CONFIG"
-  else
-    # Иначе добавляем в конец файла
-    echo "${key} ${value}" >> "$SSHD_CONFIG"
+setup_ufw() {
+  if ss -tlnp | grep -q ':443'; then
+    echo "⚠️ Порт 443 уже занят. Освободи его перед запуском Xray."
   fi
+
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw allow OpenSSH
+  ufw allow 443/tcp comment 'xray vless reality'
+  ufw allow 8443/tcp comment 'xray vless reality backup'
+  ufw allow 2040/tcp comment 'xray shadowsocks'
+  ufw --force enable
 }
 
-# Настройки безопасности SSH
-update_ssh_config "PermitRootLogin" "prohibit-password"
-update_ssh_config "PubkeyAuthentication" "yes"
-update_ssh_config "PasswordAuthentication" "no"
-update_ssh_config "ChallengeResponseAuthentication" "no"
-update_ssh_config "UsePAM" "yes"
-update_ssh_config "X11Forwarding" "no"
-update_ssh_config "MaxAuthTries" "3"
-update_ssh_config "MaxSessions" "5"
-update_ssh_config "ClientAliveInterval" "300"
-update_ssh_config "ClientAliveCountMax" "2"
+setup_ssh() {
+  local username="${1:-}"
+  local server_pubkey_file="$KEY_DIR/server_ed25519.pub"
+  local server_privkey_file="$KEY_DIR/server_ed25519"
+  local auth_keys="/root/.ssh/authorized_keys"
 
-# Перезапуск SSH
-systemctl restart sshd
-echo "SSH настроен и перезапущен"
+  ssh-keygen -t ed25519 -N "" -f "$server_privkey_file" -C "server@$(hostname)" >/dev/null
 
-# ============================================================
-# 5. Создание пользовательских конфигов
-# ============================================================
-echo "=== 5. Создание пользовательских конфигов ==="
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  cat "$server_pubkey_file" > "$auth_keys" 2>/dev/null || true
+  cat "$server_privkey_file.pub" > "$server_pubkey_file"
+  cp "$server_privkey_file" "$KEY_DIR/root_private_key_DO_NOT_LEAVE_ON_SERVER"
+  cp "$server_privkey_file.pub" "$KEY_DIR/root_public_key.pub"
+  chmod 600 "$auth_keys" "$KEY_DIR/root_private_key_DO_NOT_LEAVE_ON_SERVER" "$KEY_DIR/root_public_key.pub"
 
-# Исправление 7: вычисляем ss_encoded перед созданием README.txt
-ss_encoded=$(echo -n "chacha20-ietf-poly1305:${xray_sspasw_vrv}" | base64 | tr -d '\n')
+  if [[ -n "${username:-}" ]] && id "$username" &>/dev/null; then
+    mkdir -p "/home/$username/.ssh"
+    chmod 700 "/home/$username/.ssh"
+    cp "$KEY_DIR/root_public_key.pub" "/home/$username/.ssh/authorized_keys"
+    chown -R "$username:$username" "/home/$username/.ssh"
+    chmod 600 "/home/$username/.ssh/authorized_keys"
+  fi
 
-# Создаем конфигурационные файлы для клиентов
-CONFIG_DIR="$SCRIPT_DIR/client_configs"
-mkdir -p "$CONFIG_DIR"
+  sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
+  sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config || true
+  grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
+  grep -q '^UsePAM ' /etc/ssh/sshd_config || echo 'UsePAM yes' >> /etc/ssh/sshd_config
+  systemctl restart sshd
+}
 
-# VLESS 443 клиентский конфиг (JSON для Xray клиента)
-cat << EOF > "$CONFIG_DIR/vless_443_client.json"
+write_client_configs() {
+  local server_ip="$1"
+  local ss_encoded
+  ss_encoded="$(printf 'chacha20-ietf-poly1305:%s' "$xray_sspasw_vrv" | base64 -w 0)"
+
+  cat > "$CLIENT_DIR/vless_443_client.json" <<EOF
 {
   "inbounds": [{
     "port": 10808,
     "listen": "127.0.0.1",
     "protocol": "socks",
-    "settings": {
-      "udp": true
-    }
+    "settings": { "udp": true }
   }],
   "outbounds": [{
     "protocol": "vless",
     "settings": {
       "vnext": [{
-        "address": "${ipserv}",
+        "address": "$server_ip",
         "port": 443,
         "users": [{
-          "id": "${xray_uuid_vrv}",
+          "id": "$xray_uuid_vrv",
           "flow": "xtls-rprx-vision",
           "encryption": "none"
         }]
@@ -394,10 +292,10 @@ cat << EOF > "$CONFIG_DIR/vless_443_client.json"
       "network": "tcp",
       "security": "reality",
       "realitySettings": {
-        "serverName": "${xray_dest_vrv}",
+        "serverName": "$xray_dest_vrv",
         "fingerprint": "chrome",
-        "publicKey": "${xray_publicKey_vrv}",
-        "shortId": "${xray_shortIds_vrv}",
+        "publicKey": "$xray_publicKey_vrv",
+        "shortId": "$xray_shortIds_vrv",
         "spiderX": "/"
       }
     }
@@ -405,25 +303,22 @@ cat << EOF > "$CONFIG_DIR/vless_443_client.json"
 }
 EOF
 
-# VLESS 8443 клиентский конфиг
-cat << EOF > "$CONFIG_DIR/vless_8443_client.json"
+  cat > "$CLIENT_DIR/vless_8443_client.json" <<EOF
 {
   "inbounds": [{
     "port": 10809,
     "listen": "127.0.0.1",
     "protocol": "socks",
-    "settings": {
-      "udp": true
-    }
+    "settings": { "udp": true }
   }],
   "outbounds": [{
     "protocol": "vless",
     "settings": {
       "vnext": [{
-        "address": "${ipserv}",
+        "address": "$server_ip",
         "port": 8443,
         "users": [{
-          "id": "${xray_uuid_vrv}",
+          "id": "$xray_uuid_vrv",
           "flow": "xtls-rprx-vision",
           "encryption": "none"
         }]
@@ -433,10 +328,10 @@ cat << EOF > "$CONFIG_DIR/vless_8443_client.json"
       "network": "tcp",
       "security": "reality",
       "realitySettings": {
-        "serverName": "${xray_dest_vrv222}",
+        "serverName": "$xray_dest_vrv222",
         "fingerprint": "chrome",
-        "publicKey": "${xray_publicKey_vrv}",
-        "shortId": "${xray_shortIds_vrv}",
+        "publicKey": "$xray_publicKey_vrv",
+        "shortId": "$xray_shortIds_vrv",
         "spiderX": "/"
       }
     }
@@ -444,90 +339,96 @@ cat << EOF > "$CONFIG_DIR/vless_8443_client.json"
 }
 EOF
 
-# Shadowsocks клиентский конфиг
-cat << EOF > "$CONFIG_DIR/shadowsocks_client.json"
+  cat > "$CLIENT_DIR/shadowsocks_client.json" <<EOF
 {
   "inbounds": [{
     "port": 10810,
     "listen": "127.0.0.1",
     "protocol": "socks",
-    "settings": {
-      "udp": true
-    }
+    "settings": { "udp": true }
   }],
   "outbounds": [{
     "protocol": "shadowsocks",
     "settings": {
       "servers": [{
-        "address": "${ipserv}",
+        "address": "$server_ip",
         "port": 2040,
         "method": "chacha20-ietf-poly1305",
-        "password": "${xray_sspasw_vrv}"
+        "password": "$xray_sspasw_vrv"
       }]
     }
   }]
 }
 EOF
 
-# Создаем файл с информацией о всех конфигурациях
-# Исправление 7: ss_encoded теперь определен
-cat << EOF > "$CONFIG_DIR/README.txt"
+  cat > "$CLIENT_DIR/README.txt" <<EOF
 ===========================================
 VPN Конфигурации
-Сервер IP: ${ipserv}
+Сервер IP: $server_ip
 Дата установки: $(date)
 ===========================================
 
-1. VLESS + REALITY (Порт 443) - Основной
-   Ссылка: vless://${xray_uuid_vrv}@${ipserv}:443?security=reality&sni=${xray_dest_vrv}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-443
-   Конфиг файл: vless_443_client.json
+1. VLESS + REALITY (Порт 443)
+vless://$xray_uuid_vrv@$server_ip:443?security=reality&sni=$xray_dest_vrv&fp=chrome&pbk=$xray_publicKey_vrv&sid=$xray_shortIds_vrv&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-443
 
-2. VLESS + REALITY (Порт 8443) - Резервный
-   Ссылка: vless://${xray_uuid_vrv}@${ipserv}:8443?security=reality&sni=${xray_dest_vrv222}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-8443
-   Конфиг файл: vless_8443_client.json
+2. VLESS + REALITY (Порт 8443)
+vless://$xray_uuid_vrv@$server_ip:8443?security=reality&sni=$xray_dest_vrv222&fp=chrome&pbk=$xray_publicKey_vrv&sid=$xray_shortIds_vrv&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-8443
 
-3. Shadowsocks (Порт 2040) - Резервный
-   Ссылка: ss://${ss_encoded}@${ipserv}:2040#VPN-2040
-   Конфиг файл: shadowsocks_client.json
+3. Shadowsocks (Порт 2040)
+ss://$ss_encoded@$server_ip:2040#VPN-2040
 
-SSH Конфигурация:
-- Парольная аутентификация отключена
-- Доступ только по SSH-ключам
-- Root доступ: только по ключам
-- Конфиг файл SSH: ${SSHD_CONFIG}.backup (оригинал)
+SSH files:
+- Public key: $KEY_DIR/root_public_key.pub
+- Private key: $KEY_DIR/root_private_key_DO_NOT_LEAVE_ON_SERVER
 ===========================================
 EOF
+}
 
-# ============================================================
-# 6. Красивый вывод итоговой информации
-# ============================================================
-echo -e "${BOLD}${GREEN}╔════════════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}${GREEN}║   🚀 VPN & SSH SETUP COMPLETED SUCCESSFULLY   ║${RESET}"
-echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════╝${RESET}"
+final_output() {
+  local server_ip="$1"
+  local ss_encoded
+  ss_encoded="$(printf 'chacha20-ietf-poly1305:%s' "$xray_sspasw_vrv" | base64 -w 0)"
 
-print_section "🔑 SSH AUTHORIZED KEYS"
-for i in "${!SSH_PUBKEYS[@]}"; do
-    printf "${CYAN}  Key %d:${RESET} ${GREEN}%s...${RESET}\n" $((i+1)) "${SSH_PUBKEYS[$i]:0:40}"
-done
+  print_section "SSH KEYS"
+  echo "Public key:"
+  cat "$KEY_DIR/root_public_key.pub"
+  echo
+  echo "Private key:"
+  cat "$KEY_DIR/root_private_key_DO_NOT_LEAVE_ON_SERVER"
+  echo
 
-print_section "🌐 VPN CONFIGURATIONS"
+  print_section "VPN LINKS"
+  echo "VLESS 443:"
+  echo "vless://$xray_uuid_vrv@$server_ip:443?security=reality&sni=$xray_dest_vrv&fp=chrome&pbk=$xray_publicKey_vrv&sid=$xray_shortIds_vrv&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-443"
+  echo
+  echo "VLESS 8443:"
+  echo "vless://$xray_uuid_vrv@$server_ip:8443?security=reality&sni=$xray_dest_vrv222&fp=chrome&pbk=$xray_publicKey_vrv&sid=$xray_shortIds_vrv&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-8443"
+  echo
+  echo "Shadowsocks 2040:"
+  echo "ss://$ss_encoded@$server_ip:2040#VPN-2040"
+  echo
 
-echo -e "${BOLD}${GREEN}  VLESS + REALITY (Primary port 443)${RESET}"
-echo -e "${CYAN}  vless://${xray_uuid_vrv}@${ipserv}:443?security=reality&sni=${xray_dest_vrv}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-443${RESET}"
+  print_section "FILES"
+  echo "Client dir: $CLIENT_DIR"
+  echo "SSH key dir: $KEY_DIR"
+  echo "Log: $LOG_FILE"
+}
 
-echo -e "\n${BOLD}${GREEN}  VLESS + REALITY (Backup port 8443)${RESET}"
-echo -e "${CYAN}  vless://${xray_uuid_vrv}@${ipserv}:8443?security=reality&sni=${xray_dest_vrv222}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#VPN-8443${RESET}"
+main() {
+  need_root
+  make_dirs
+  install_packages
+  install_xray
+  generate_xray_data
+  write_xray_config
+  start_xray
+  setup_ufw
+  setup_ssh "${1:-serv}"
+  write_client_configs "$ipserv"
+  final_output "$ipserv"
+  echo
+  echo "✅ Готово. Скопируй public/private key из вывода выше и перенеси private key на ноутбук."
+  echo "⚠️ После этого удали private key с сервера."
+}
 
-echo -e "\n${BOLD}${GREEN}  Shadowsocks (Backup port 2040)${RESET}"
-echo -e "${CYAN}  ss://${ss_encoded}@${ipserv}:2040#VPN-2040${RESET}"
-
-print_section "📁 CLIENT CONFIG FILES"
-echo -e "${GREEN}  Directory: ${CONFIG_DIR}${RESET}"
-echo -e "${GREEN}  Readme:    ${CONFIG_DIR}/README.txt${RESET}"
-
-print_section "⚠️ IMPORTANT CHECKLIST"
-echo -e "${YELLOW}  1. Замените SSH_PUBKEYS на действительные ключи${RESET}"
-echo -e "${YELLOW}  2. Проверьте что порт 443 свободен (ss -tlnp | grep 443)${RESET}"
-echo -e "${YELLOW}  3. Если порт 443 занят - остановите nginx/apache${RESET}"
-echo -e "${YELLOW}  4. Проверьте сервис Xray: systemctl status xray${RESET}"
-echo -e "${YELLOW}  5. Лог установки: $LOG_FILE${RESET}"
+main "$@"
