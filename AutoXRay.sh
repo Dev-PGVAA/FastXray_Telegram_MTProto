@@ -8,7 +8,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Настройки — поменяй при необходимости
 # ---------------------------------------------------------------------------
-LOCATION_TAG="VPS"     # метка в названиях конфигов
+LOCATION_TAG="VPS"
 LOG_FILE="/var/log/vpn-setup.log"
 SCRIPT_DIR="/usr/local/etc/xray"
 CLIENT_DIR="$SCRIPT_DIR/client_configs"
@@ -92,10 +92,10 @@ print_banner() {
   cat << 'BANNER'
     ███████╗ █████╗ ███████╗████████╗██╗  ██╗██████╗  █████╗ ██╗   ██╗
     ██╔════╝██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝██╔══██╗██╔══██╗╚██╗ ██╔╝
-    █████╗  ███████║███████╗   ██║    ╚███╔╝ ██████╔╝███████║ ╚████╔╝ 
-    ██╔══╝  ██╔══██║╚════██║   ██║    ██╔██╗ ██╔══██╗██╔══██║  ╚██╔╝  
-    ██║     ██║  ██║███████║   ██║   ██╔╝ ██╗██║  ██║██║  ██║   ██║   
-    ╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   
+    █████╗  ███████║███████╗   ██║    ╚███╔╝ ██████╔╝███████║ ╚████╔╝
+    ██╔══╝  ██╔══██║╚════██║   ██║    ██╔██╗ ██╔══██╗██╔══██║  ╚██╔╝
+    ██║     ██║  ██║███████║   ██║   ██╔╝ ██╗██║  ██║██║  ██║   ██║
+    ╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝
 BANNER
   echo -e "${C_RESET}"
   echo -e "${C_DIM}  VLESS+REALITY · Shadowsocks · Telegram MTProto${C_RESET}"
@@ -109,8 +109,9 @@ BANNER
 ANSWER_CREATE_USER="n"
 ANSWER_USERNAME=""
 ANSWER_USER_PASSWORD=""
-ANSWER_LOGIN_METHOD=""   # password | key | both
+ANSWER_LOGIN_METHOD=""
 ANSWER_WANT_MTPROTO="n"
+ANSWER_DISABLE_ROOT_LOGIN="y"
 
 collect_answers() {
   echo -e "${C_WHITE}${C_BOLD}Перед установкой — несколько вопросов.${C_RESET}"
@@ -157,6 +158,13 @@ collect_answers() {
     else
       ANSWER_USER_PASSWORD="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)"
     fi
+  fi
+
+  echo
+  if ask_yn "Отключить root login по SSH?" "y"; then
+    ANSWER_DISABLE_ROOT_LOGIN="y"
+  else
+    ANSWER_DISABLE_ROOT_LOGIN="n"
   fi
 
   echo
@@ -388,18 +396,18 @@ setup_ufw() {
 }
 
 setup_ssh_hardening() {
-  # Отключаем вход по паролю только если есть рабочий способ зайти без пароля
-  # (новый юзер с ключом). Иначе НЕ трогаем PasswordAuthentication, чтобы не
-  # отрезать самому себе доступ к серверу.
-  if [[ "$ANSWER_CREATE_USER" == "y" ]] && [[ "$ANSWER_LOGIN_METHOD" == "key" ]]; then
-    sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
-    sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config || true
-    grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
-    grep -q '^UsePAM ' /etc/ssh/sshd_config || echo 'UsePAM yes' >> /etc/ssh/sshd_config
-    systemctl restart sshd
-    ok "SSH: вход по паролю отключён (используешь ключ для $ANSWER_USERNAME)"
+  local ssh_service="ssh"
+  systemctl list-unit-files | grep -q '^sshd\.service' && ssh_service="sshd"
+
+  if [[ "$ANSWER_DISABLE_ROOT_LOGIN" == "y" ]]; then
+    cp -a /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+    sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config || true
+    grep -q '^PermitRootLogin ' /etc/ssh/sshd_config || echo 'PermitRootLogin no' >> /etc/ssh/sshd_config
+    sshd -t
+    systemctl restart "$ssh_service"
+    ok "SSH: root login отключён"
   else
-    info "SSH: вход по паролю не отключаю (нет настроенного ключа для входа)"
+    info "SSH: root login не отключаю (по выбору)"
   fi
 }
 
@@ -475,7 +483,7 @@ write_client_links() {
   local server_ip="$1"
   local tag_encoded
   tag_encoded="$(printf '%s' "$LOCATION_TAG" | jq -sRr @uri)"
-  ss_link_b64="$(printf 'chacha20-ietf-poly1305:%s' "$xray_sspasw_vrv" | base64 -w 0)"
+  ss_link_b64="$(printf 'chacha20-ietf-poly1305:%s' "$xray_sspasw_vrv" | base64 -w 0)
 
   vless_main_link="vless://${xray_uuid_vrv}@${server_ip}:${PORT_VLESS_MAIN}?security=reality&sni=${xray_dest_vrv}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#${tag_encoded}%20VLESS%20${PORT_VLESS_MAIN}"
   vless_backup_link="vless://${xray_uuid_vrv}@${server_ip}:${PORT_VLESS_BACKUP}?security=reality&sni=${xray_dest_vrv222}&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&type=tcp&flow=xtls-rprx-vision&encryption=none&spx=%2F#${tag_encoded}%20VLESS%20${PORT_VLESS_BACKUP}%20backup"
@@ -548,7 +556,7 @@ final_output() {
   echo
   echo -e "${C_DIM}${LINE_THIN}${C_RESET}"
 
-  echo -e "${C_WHITE}${C_BOLD}🔗 VLESS+REALITY${C_RESET} ${C_DIM}(основной, порт ${PORT_VLESS_MAIN})${C_RESET}"
+  echo -e "${C_WHITE}${C_BOLD}🔗 VLESS+REALITY${C_RESET} ${C_DIM}(основной, port ${PORT_VLESS_MAIN})${C_RESET}"
   echo -e "  ${C_YELLOW}${vless_main_link}${C_RESET}"
   echo
   echo -e "${C_WHITE}${C_BOLD}🔗 VLESS+REALITY${C_RESET} ${C_DIM}(резервный, порт ${PORT_VLESS_BACKUP})${C_RESET}"
@@ -615,7 +623,6 @@ final_output() {
   echo
   echo -e "  ${C_GREEN}2.${C_RESET} В клиенте выбери ${C_BOLD}«Добавить конфиг по ссылке»${C_RESET} и вставь"
   echo -e "     любую из ссылок выше — либо ${C_BOLD}«Импорт по base64»${C_RESET} и вставь общий блок."
-  echo
   echo -e "  ${C_GREEN}3.${C_RESET} Подключайся через VLESS+REALITY (${PORT_VLESS_MAIN}) — это основной;"
   echo -e "     ${PORT_VLESS_BACKUP} и Shadowsocks — запасные, если основной заблокирован."
 
